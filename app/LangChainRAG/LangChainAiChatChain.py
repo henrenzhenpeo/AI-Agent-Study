@@ -1,4 +1,5 @@
 from dotenv import load_dotenv
+from langchain_core.runnables import RunnableSerializable
 
 load_dotenv()
 
@@ -17,12 +18,17 @@ history_message = [
     ("human","你是一个边塞诗人，可以作诗"),
     ("ai","大漠孤烟直，长河落日圆"),
     ("human","好诗再来一首"),
-    ("ai","万里悲秋常作客，艰难苦恨繁霜鬓"),
+    ("ai","黄沙百战穿金甲，不破楼兰终不还"),
 ]
 
-model = ChatTongyi(model="qwen3-max")
+model = ChatTongyi(model = "qwen3-max")
 
-chain = chat_prompt_tempt | model
+chain: RunnableSerializable = chat_prompt_tempt | model
+
+print(type(chain))
+
+res = chain.invoke({"history":history_message})
+print(res.content)
 
 for chunk in chain.stream({"history":history_message}):
-    print(chunk.content ,end="", flush=True)
+    print(chunk.content, end="",flush=True)
