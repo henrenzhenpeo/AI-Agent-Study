@@ -1,0 +1,465 @@
+    /**
+     * 获取签名流程表单信息(huabei成果审批流程信息)
+     *
+     * @param instanceId
+     * @return
+     */
+    public OperationResult<FlowFormDataVo> queryFormDataEx(String instanceId) {
+        FlowFormDataVo vo = new FlowFormDataVo();
+        log.debug("queryFormData in");
+        // 获取签名业务信息
+        SignatureApprovalFormVo signatureApprovalFormVo = new SignatureApprovalFormVo();
+        SysSignatureApproval sysSignatureApproval = sysSignatureApprovalService.lambdaQuery()
+                .eq(SysSignatureApproval::getId, instanceId)
+                .last("limit 1")
+                .one();
+        if (sysSignatureApproval != null) {
+            log.debug("sysSignatureApproval do");
+            // 签名记录基本信息
+            signatureApprovalFormVo = sysSignatureApprovalMapper.getSignatureApprovalFormBaseInfo(instanceId);
+            if (signatureApprovalFormVo != null) {
+                signatureApprovalFormVo.setDesignDepartment(signatureApprovalFormVo.getDepartment());
+                if (StrUtil.isNotBlank(signatureApprovalFormVo.getCreateDate())) {
+                    try {
+                        SimpleDateFormat format1 = new SimpleDateFormat("yyyyMMddHHmmssSSS");
+                        Date createDate = format1.parse(signatureApprovalFormVo.getCreateDate());
+                        SimpleDateFormat format2 = new SimpleDateFormat("yyyy-MM-dd HH:mm:ss");
+                        signatureApprovalFormVo.setCreateDate(format2.format(createDate));
+                    } catch (Exception ex) {
+
+                    }
+                }
+                List<ProProjectDictionaryFile> departments = proProjectDictionaryFileService.lambdaQuery()
+                        .eq(ProProjectDictionaryFile::getProjectId, sysSignatureApproval.getProjectId())
+                        .eq(ProProjectDictionaryFile::getDictionaryType, DictionaryTypeEnum.ProjectDepartmentRelation.getVaule())
+                        .list();
+                if (CollUtil.isNotEmpty(departments)) {
+                    String departNames = departments.stream().map(ProProjectDictionaryFile::getName).collect(Collectors.joining(","));
+                    if (StrUtil.isNotBlank(departNames)) {
+                        signatureApprovalFormVo.setDepartment(departNames);
+                    }
+                }
+                // 签章信息
+                List<String> signCertificateIds = sysSignatureApprovalStampService.lambdaQuery()
+                        .eq(SysSignatureApprovalStamp::getSignatureApprovalId, instanceId)
+                        .list().stream().map(SysSignatureApprovalStamp::getCertificateId).collect(Collectors.toList());
+                List<CertificateVo> projectSeals = certificateMapper.queryProjectCertificateVos(signatureApprovalFormVo.getProjectId(), new String[]{}, new String[]{}, null);
+                projectSeals = projectSeals.stream()
+                        .filter(a -> a.getCategory() == CertificateTypeEnum.RegistrationSignature.getVaule() || a.getCategory() == CertificateTypeEnum.CorporateSeal.getVaule())
+                        .collect(Collectors.toList());
+
+                List<SignatureApprovalFormCertificateVo> signcertificates = new ArrayList<>();
+                if (projectSeals != null && projectSeals.size() > 0) {
+                    for (CertificateVo certificate : projectSeals) {
+                        SignatureApprovalFormCertificateVo signcert = signcertificates.stream()
+                                .filter(a -> a.getId().equals(certificate.getId())).findAny().orElse(null);
+                        if (signcert != null) {
+                            continue;
+                        }
+                        signcert = new SignatureApprovalFormCertificateVo();
+                        signcert.setId(certificate.getId());
+                        if (certificate.getCategory() == CertificateTypeEnum.RegistrationSignature.getVaule()) {
+                            signcert.setName(certificate.getName() + "(" + certificate.getSpecialtyName() + ")");
+                        } else {
+                            signcert.setName(certificate.getName());
+                        }
+                        signcert.setCheck(false);
+                        if (signCertificateIds != null && signCertificateIds.size() > 0) {
+                            if (signCertificateIds.contains(certificate.getId())) {
+                                signcert.setCheck(true);
+                            }
+                        }
+                        signcertificates.add(signcert);
+                    }
+                }
+                signatureApprovalFormVo.setCertificates(signcertificates);
+                //文件识别信息 - 使用与 GetAllByFolderId 相同的数据源
+                List<SignatureApprovalFormFileGroupVo> fileGroupVos = new ArrayList<>();
+                // 从签名审批关联的文件中获取 folderId
+                List<SysSignatureApprovalFile> signatureApprovalFiles = sysSignatureApprovalFileService.lambdaQuery()
+                        .eq(SysSignatureApprovalFile::getSignatureApprovalId, instanceId)
+                        .list();
+                String folderId = null;
+                if (CollUtil.isNotEmpty(signatureApprovalFiles)) {
+                    // 从第一个关联的文件中获取 folderId
+                    String firstFileId = signatureApprovalFiles.get(0).getFileId();
+                    SynFile firstFile = synFileService.getById(firstFileId);
+                    if (firstFile != null && StrUtil.isNotBlank(firstFile.getFolderId())) {
+                        folderId = firstFile.getFolderId();
+                    }
+                }
+                
+                // 阶段
+                String phaseName = "";
+                ProProjectPhase proProjectPhase = proProjectphaseService.firstOrDefault(new LambdaQueryWrapper<ProProjectPhase>()
+                        .eq(ProProjectPhase::getProjectId, sysSignatureApproval.getProjectId()));
+                if (proProjectPhase != null) {
+                    phaseName = proProjectPhase.getName();
+                }
+                String finalPhaseName = phaseName;
+                
+                // 使用 GetAllByFolderId 的逻辑获取文件列表
+                List<SynFile> files = new ArrayList<>();
+                if (StrUtil.isNotBlank(folderId)) {
+                    try {
+                        // 使用与 GetAllByFolderId 接口相同的参数调用
+                        files = synFileService.getAllByFolderId(folderId, false, null, null, null, null, null, false, true);
+                    } catch (Exception ex) {
+                        log.error("获取文件夹文件列表失败: " + ex.getMessage(), ex);
+                    }
+                }
+                
+                if (CollUtil.isNotEmpty(files)) {
+                    // 获取文件的打印信息
+                    List<String> fileIds = files.stream().map(SynFile::getId).collect(Collectors.toList());
+                    List<String> md5s = files.stream().map(SynFile::getMd5).collect(Collectors.toList());
+                    Map<String, SysPlotInfo> plotInfoMap = new HashMap<>();
+                    if (CollUtil.isNotEmpty(md5s)) {
+                        List<SysPlotInfo> plotInfos = sysPlotInfoService.lambdaQuery()
+                                .in(SysPlotInfo::getMd5, md5s)
+                                .list();
+                        plotInfoMap = plotInfos.stream()
+                                .collect(Collectors.toMap(SysPlotInfo::getMd5, p -> p, (p1, p2) -> p1));
+                    }
+                    
+                    // 获取文件夹信息以获取阶段和子项名称
+                    Map<String, SynFolder> folderMap = new HashMap<>();
+                    Set<String> folderIds = files.stream().map(SynFile::getFolderId).filter(StrUtil::isNotBlank).collect(Collectors.toSet());
+                    if (CollUtil.isNotEmpty(folderIds)) {
+                        List<SynFolder> folders = synFolderService.listByIds(folderIds);
+                        folderMap = folders.stream()
+                                .collect(Collectors.toMap(SynFolder::getId, f -> f, (f1, f2) -> f1));
+                    }
+                    
+                    // 按阶段_子项分组
+                    Map<String, List<SynFile>> groupFiles = new HashMap<>();
+                    for (SynFile file : files) {
+                        SynFolder folder = folderMap.get(file.getFolderId());
+                        String phaseNameForFile = finalPhaseName;
+                        String subProjectName = "";
+                        if (folder != null) {
+                            if (StrUtil.isNotBlank(folder.getProjectPhaseId())) {
+                                ProProjectPhase phase = proProjectphaseService.getById(folder.getProjectPhaseId());
+                                if (phase != null) {
+                                    phaseNameForFile = phase.getName();
+                                }
+                            }
+                            if (StrUtil.isNotBlank(folder.getSubProjectId())) {
+                                ProSubProject subProject = proSubProjectService.getById(folder.getSubProjectId());
+                                if (subProject != null) {
+                                    subProjectName = subProject.getName();
+                                }
+                            }
+                        }
+                        String groupKey = StrUtil.isNotBlank(subProjectName) ? phaseNameForFile + "_" + subProjectName : phaseNameForFile;
+                        groupFiles.computeIfAbsent(groupKey, k -> new ArrayList<>()).add(file);
+                    }
+                    
+                    log.debug("excute groupFiles ok");
+                    for (Map.Entry<String, List<SynFile>> entry : groupFiles.entrySet()) {
+                        String key = entry.getKey();
+                        List<SynFile> curFiles = entry.getValue();
+                        SignatureApprovalFormFileGroupVo curFileGroup = new SignatureApprovalFormFileGroupVo();
+                        curFileGroup.setName(key);
+                        curFileGroup.setCount(curFiles.size());
+                        List<Map<String, String>> fileRecognizeVos = new ArrayList<>();
+
+                        String fieldsConfig = StrUtil.isNotEmpty(signatureFileRoleList) ? signatureFileRoleList : "图纸名称|图纸名称,图幅|图幅,项目负责人|项目负责1,专业负责人|专业负责1,校对|校对,审核|审核,审定|审定";
+                        log.debug("setInstance fieldsConfig:" + fieldsConfig);
+                        String[] contents = Arrays.asList(fieldsConfig.split(",")).stream().filter(x -> StringUtils.isNotBlank(x)).toArray(String[]::new);
+
+                        for (SynFile file : curFiles) {
+                            if (StrUtil.isBlank(signatureApprovalFormVo.getPhaseName())) {
+                                SynFolder folder = folderMap.get(file.getFolderId());
+                                if (folder != null && StrUtil.isNotBlank(folder.getProjectPhaseId())) {
+                                    ProProjectPhase phase = proProjectphaseService.getById(folder.getProjectPhaseId());
+                                    if (phase != null) {
+                                        signatureApprovalFormVo.setPhaseName(phase.getName());
+                                    } else {
+                                        signatureApprovalFormVo.setPhaseName(phaseName);
+                                    }
+                                } else {
+                                    signatureApprovalFormVo.setPhaseName(phaseName);
+                                }
+                            }
+                            
+                            //解析json
+                            log.debug("setInstance 解析json");
+                            Map<String, String> mapVo = new HashMap<>();
+                            SysPlotInfo plotInfo = plotInfoMap.get(file.getMd5());
+                            String printerDrive = plotInfo != null ? plotInfo.getPrinterDrive() : null;
+                            
+                            if (StrUtil.isNotBlank(printerDrive) && printerDrive.equals("uc^convert")) {
+                                //手动签章直接返回，手动签章的文件没有打印信息
+                                for (int i = 0; i < contents.length; i++) {
+                                    String content = contents[i];
+                                    String[] values = Arrays.asList(content.split("\\|")).stream().filter(x -> StringUtils.isNotBlank(x)).toArray(String[]::new);
+                                    if (values.length != 2) {
+                                        continue;
+                                    }
+                                    if (i == 0) {
+                                        mapVo.put(values[0], file.getName());
+                                    } else {
+                                        mapVo.put(values[0], "");
+                                    }
+                                }
+                            } else {
+                                log.debug("setInstance 识别打印信息json");
+                                String attachInfo = (plotInfo != null && StrUtil.isNotBlank(plotInfo.getAttachInfo())) ? plotInfo.getAttachInfo() : "{}";
+                                JSONObject json = JSON.parseObject(attachInfo);
+                                for (int i = 0; i < contents.length; i++) {
+                                    String content = contents[i];
+                                    log.debug("setInstance 拆解content");
+                                    String[] values = Arrays.asList(content.split("\\|")).stream().filter(x -> StringUtils.isNotBlank(x)).toArray(String[]::new);
+                                    if (values.length != 2) {
+                                        continue;
+                                    }
+                                    String title = values[0];
+                                    String field = values[1];
+                                    String val = "";
+                                    boolean containsKey = json.containsKey(field);
+                                    if (containsKey) {
+                                        val = json.getString(field);
+                                    } else if (field.equals("图纸名称") || field.equals("图名")) {
+                                        val = file.getName();
+                                    }
+                                    mapVo.put(title, val);
+                                }
+                            }
+                            if (!mapVo.containsKey("md5"))
+                                mapVo.put("md5", file.getMd5());
+                            if (!mapVo.containsKey("fileName"))
+                                mapVo.put("fileName", file.getName());
+                            fileRecognizeVos.add(mapVo);
+                        }
+
+                        curFileGroup.setFileRecognizes(fileRecognizeVos);
+                        fileGroupVos.add(curFileGroup);
+                    }
+                }
+                signatureApprovalFormVo.setFileGroups(fileGroupVos);
+            }
+        }
+        log.debug("setInstance set" + signatureApprovalFormVo != null ? "not null" : "null");
+        vo.setInstance(signatureApprovalFormVo);
+
+        // 获取流程审批信息
+        String processInstanceId = "";
+        HistoricVariableInstance result = historyService.createHistoricVariableInstanceQuery()
+                .variableValueEquals(CommonConstant.FLOW_INSTANCE_ID, instanceId)
+                .listPage(0, 1)
+                .stream()
+                .findFirst()
+                .orElse(null);
+
+        if (result != null) {
+            processInstanceId = result.getProcessInstanceId();
+            ActHiProcInst inst = actHiProcInstMapper.queryById(processInstanceId);
+            List<String> ids = new ArrayList<>();
+            ids.add(processInstanceId);
+            List<ActHiVarInst> vars = actRuTaskMapper.queryProcInstVariables(ids);
+            vars = vars.stream()
+                    .sorted(Comparator.comparing(ActHiVarInst::getCreateTime).reversed()) // 降序
+                    .collect(Collectors.toList());
+            if (CollUtil.isNotEmpty(vars)) {
+                Map<String, String> items = new HashMap<>();
+                for (ActHiVarInst var : vars) {
+                    if (var.getName().equals("projectApprovals") && StringUtils.isNotBlank(var.getText())) {
+                        items.put(var.getName(), var.getText());
+                        break;
+                    }
+                }
+                inst.setInstanceVariables(items);
+            }
+            vo.setProcessInstance(inst);
+
+            // 获取流程审批信息
+            List<ActHiActInst> list = actHiActInstMapper.queryProcessActivities(processInstanceId);
+            vo.setActivities(list);
+        }
+
+
+        //特种设备相关信息
+        //获取文件关联校审单
+        List<SysSignatureApprovalFile> files = sysSignatureApprovalFileService.lambdaQuery().eq(SysSignatureApprovalFile::getSignatureApprovalId, instanceId).list();
+        try {
+            List<String> fileIds = files.stream().map(SysSignatureApprovalFile::getFileId).collect(Collectors.toList());
+            List<String> md5s = files.stream().map(SysSignatureApprovalFile::getMd5).collect(Collectors.toList());
+            List<SysProof> proofs = new ArrayList<>();
+            //包含特种设备的
+            List<SysProof> TZproofs = new ArrayList<>();
+            for (SysSignatureApprovalFile sf : files) {
+                SysProof append = geCommontFileCheckRecord(sf.getMd5(), sf.getFileId());
+                if (append != null)
+                    proofs.add(append);
+            }
+            if (CollUtil.isNotEmpty(proofs)) {
+                List<String> proofIds = proofs.stream().map(SysProof::getId).collect(Collectors.toList());
+                Integer approleType = 0;//0,不包含，1，只有管道，2.只有容器，3两个都有
+                //查校审单存的记录
+                List<ProProjectDictionaryFile> proofData = proProjectDictionaryFileService.lambdaQuery().eq(ProProjectDictionaryFile::getDictionaryType, DictionaryTypeEnum.SpecialDesignParam.getVaule()).in(ProProjectDictionaryFile::getCode, proofIds).list();
+                if (CollUtil.isNotEmpty(proofData)) {
+                    List<Integer> allType = new ArrayList<>();
+                    for (ProProjectDictionaryFile data : proofData) {
+                        String content = data.getContent();
+                        if (StringUtils.isNotBlank(content)) {
+                            try {
+                                JsonObject jsonObject = JsonParser.parseString(content).getAsJsonObject();
+                                Integer type = jsonObject.get("type").getAsInt();
+                                if (!type.equals(0)) {
+                                    SysProof p = proofs.stream().filter(e -> e.getId().equals(data.getCode())).findAny().orElse(null);
+                                    if (p != null) {
+                                        p.setDescription(content);//临时放一下，不存
+                                        TZproofs.add(p);
+                                    }
+                                }
+                            } catch (Exception e) {
+
+                            }
+                        }
+                    }
+                }
+            }
+            List<FileResultProofListVo> fileResultProofListVos = new ArrayList<>();
+            //包含特种设备
+            if (CollUtil.isNotEmpty(TZproofs)) {
+
+                for (SysProof sysProof : TZproofs) {
+                    FileResultProofListVo fileResultProofListVo = new FileResultProofListVo();
+                    SysSpecialty spec = sysSpecialtyService.getById(sysProof.getSpecialtyId());
+                    if (null == spec) {
+                        continue;
+                    }
+                    SynFile file = synFileService.getById(sysProof.getFileId());
+                    if (null == file) {
+                        continue;
+                    }
+                    SynFolder folder = synFolderService.getById(file.getFolderId());
+                    if (null == folder) {
+                        continue;
+                    }
+                    String projectName = "";
+                    String projectCode = "";
+                    ProProject project = proProjectService.getById(sysProof.getProjectId());
+                    if (null == project) {
+                        continue;
+                    }
+                    projectName = project.getName();
+                    projectCode = project.getCode();
+                    ProSubProject subProject = null;
+                    String subProjectId = folder.getSubProjectId();
+                    String phaseId = project.getPhaseId();
+                    ProProjectPhase projectPhase = null;
+                    projectPhase = proProjectphaseService.lambdaQuery()
+                            .eq(ProProjectPhase::getProjectId, sysProof.getProjectId())
+                            .eq(ProProjectPhase::getPhaseId, phaseId)
+                            .list().stream()
+                            .findFirst().orElse(null);
+
+                    String proPhaseId = projectPhase != null ? projectPhase.getId() : "";
+                    String phaseName = projectPhase != null ? projectPhase.getName() : "";
+                    String subProjectName = "";
+                    String subProjectCode = "";
+                    String createrName = "";
+                    SysUser creater = sysUserService.getById(sysProof.getSendUserId());
+                    createrName = creater.getRealname();
+                    if (StringUtils.isNotBlank(subProjectId)) {
+                        subProject = proSubProjectService.getById(subProjectId);
+                        subProjectName = subProject.getName();
+                        subProjectCode = subProject.getCode();
+                    }
+
+                    String specialtyName = spec != null ? spec.getName() : "";
+                    //审批人
+                    List<SysProofUser> proofUsers = sysProofUserService.lambdaQuery()
+                            .eq(SysProofUser::getProofId, sysProof.getId())
+                            .list();
+                    List<String> proofUserIds = proofUsers.stream()
+                            .filter(a -> a.getSerial() == 1).map(a -> a.getUserId()).distinct().collect(Collectors.toList());
+                    List<String> auditUserIds = proofUsers.stream()
+                            .filter(a -> a.getSerial() == 2).map(a -> a.getUserId()).distinct().collect(Collectors.toList());
+                    List<String> approvalUserIds = proofUsers.stream()
+                            .filter(a -> a.getSerial() == 3).map(a -> a.getUserId()).distinct().collect(Collectors.toList());
+                    List<String> proofUserNames = new ArrayList<>();
+                    List<String> auditUserNames = new ArrayList<>();
+                    List<String> approvalUserNames = new ArrayList<>();
+                    List<SysUser> allUsers = new ArrayList<>();
+                    if (CollUtil.isNotEmpty(proofUsers)) {
+                        List<String> allUserIds = proofUsers.stream()
+                                .map(a -> a.getUserId()).collect(Collectors.toList());
+                        allUsers = sysUserService.lambdaQuery()
+                                .in(SysUser::getId, allUserIds)
+                                .list();
+                    }
+                    for (String id : proofUserIds) {
+                        String userName = allUsers.stream()
+                                .filter(a -> a.getId().equals(id)).map(a -> a.getRealname()).findFirst().orElse(null);
+                        proofUserNames.add(userName);
+                    }
+                    for (String id : auditUserIds) {
+                        String userName = allUsers.stream()
+                                .filter(a -> a.getId().equals(id)).map(a -> a.getRealname()).findFirst().orElse(null);
+                        auditUserNames.add(userName);
+                    }
+                    for (String id : approvalUserIds) {
+                        String userName = allUsers.stream()
+                                .filter(a -> a.getId().equals(id)).map(a -> a.getRealname()).findFirst().orElse(null);
+                        approvalUserNames.add(userName);
+                    }
+                    fileResultProofListVo.setSubproject_name(subProjectName);
+                    fileResultProofListVo.setSubproject_code(subProjectCode);
+                    fileResultProofListVo.setSpecialty(specialtyName);
+                    fileResultProofListVo.setDesign(creater.getRealname());
+                    fileResultProofListVo.setProof(proofUserNames.stream().collect(Collectors.joining(",")));
+                    fileResultProofListVo.setAudit(auditUserNames.stream().collect(Collectors.joining(",")));
+                    fileResultProofListVo.setApproval(approvalUserNames.stream().collect(Collectors.joining(",")));
+                    //解析校审单字段
+                    String content = sysProof.getDescription();
+                    if (StringUtils.isNotBlank(content)) {
+                        try {
+                            JsonObject jsonObject = JsonParser.parseString(content).getAsJsonObject();
+                            String level = jsonObject.get("level").getAsString();
+                            String mPa = jsonObject.get("mPa").getAsString();
+                            String material = jsonObject.get("material").getAsString();
+                            String medium = jsonObject.get("medium").getAsString();
+                            String nominalDiameter = jsonObject.get("nominalDiameter").getAsString();
+                            String oc = jsonObject.get("oc").getAsString();
+                            fileResultProofListVo.setLevel(level);
+                            fileResultProofListVo.setMPa(mPa);
+                            fileResultProofListVo.setMaterial(material);
+                            fileResultProofListVo.setMedium(medium);
+                            fileResultProofListVo.setNominalDiameter(nominalDiameter);
+                            fileResultProofListVo.setOc(oc);
+                            fileResultProofListVo.setProof_level("优");
+                            fileResultProofListVos.add(fileResultProofListVo);
+                        } catch (Exception e) {
+
+                        }
+                    }
+
+                }
+            }
+            signatureApprovalFormVo.setProof_list(fileResultProofListVos);
+            //整改意见
+            //查成果审批单存的记录
+            SaveFileResultRectifyParm parm = new SaveFileResultRectifyParm();
+            ProProjectDictionaryFile resultData = proProjectDictionaryFileService.lambdaQuery().eq(ProProjectDictionaryFile::getDictionaryType, DictionaryTypeEnum.FileResultParam.getVaule()).eq(ProProjectDictionaryFile::getCode, instanceId).list().stream().findAny().orElse(null);
+            if (resultData != null) {
+                String content = resultData.getContent();
+                if (StringUtils.isNotBlank(content)) {
+                    try {
+                        parm = JSONObject.parseObject(content, new TypeReference<SaveFileResultRectifyParm>() {
+                        });
+                    } catch (Exception e) {
+
+                    }
+                }
+            }
+            signatureApprovalFormVo.setRectify_list(parm);
+
+            vo.setInstance(signatureApprovalFormVo);
+        } catch (Exception e) {
+
+        }
+        return OperationResult.OK(vo);
+    }
